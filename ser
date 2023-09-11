@@ -1,0 +1,980 @@
+#!/usr/bin/env bash
+
+## Environment options
+
+SER_DEBUG_MODE=${SER_DEBUG_MODE:-0}
+SER_SSH_CONFIG="${SER_SSH_CONFIG:-/etc/ssh/ssh_config:$HOME/.ssh/config}"
+SER_OPTIONS_PATH="${SER_OPTIONS_PATH:-$HOME/.ser}"
+
+SER_LAST_VERSION_URL="${SER_LAST_VERSION_URL:-https://raw.githubusercontent.com/vjunior1981/ser/master/update/version}"
+SER_LAST_SCRIPT_URL="${SER_LAST_SCRIPT_URL:-https://raw.githubusercontent.com/vjunior1981/ser/master/ser}"
+
+## General options
+
+VERSION='0.1.0b7#7'
+
+SER_BASENAME="$(basename "$0")"
+SER_PATH="$(cd "$(dirname "$0")" && pwd)/$SER_BASENAME"
+SER_HOSTS_CACHE="$SER_OPTIONS_PATH/hosts"
+SER_HOSTS_LAST_MODIFY="$SER_OPTIONS_PATH/hosts_update"
+SER_UPTIME="$SER_OPTIONS_PATH/uptime"
+SER_TUNNELS_DIRNAME='tunnels'
+SER_TUNNELS_PATH="$SER_OPTIONS_PATH/$SER_TUNNELS_DIRNAME"
+
+COLOR_LIGHT_GRAY='\033[0;37m'
+COLOR_GREEN='\033[0;32m'
+COLOR_RED='\033[0;31m'
+NC='\033[0m'
+
+REGEXP_NUMBER='^[0-9]+$'
+REGEXP_TUNNEL_NAME='^[A-Za-z0-9_\-]+$'
+REGEXP_SPACE='[ \n\t\r\f\v]+'
+REGEXP_PATTERN_HOSTNAME='^.*[\*!,].*$'
+
+#CMD_UNSTABLE="$COLOR_RED[UNSTABLE]$NC"
+#CMD_EXPERIMENTAL="$COLOR_RED[EXPERIMENTAL]$NC"
+
+## Functions
+
+error () { echo "$1" >&2; exit 255; }
+debug_msg() { [[ $SER_DEBUG_MODE -eq 1 ]] && echo -e "${COLOR_RED}[DEBUG]${NC} $1"; return 0; }
+trim () { while read -r line; do echo "$line"; done; }
+do_cmd () { debug_msg "\$ $*"; $1 "${@:2}"; }
+
+help () {
+    case $1 in
+        name)
+echo "Usage: $SER_BASENAME name <index|pattern ...>
+
+print config names.
+
+examples:
+    $SER_BASENAME name 1 2
+    $SER_BASENAME name \"*\"
+    $SER_BASENAME name \"my*\"
+" ;;
+        cp)
+echo -e "Usage: $SER_BASENAME cp [scp_options] <source ...> [:] <destination_file ...>
+       $SER_BASENAME cp [scp_options] <source ...> [:] <destination_directory ...>
+
+copy file to hosts.
+
+examples:
+    # copy local file/dir to each host:
+    $SER_BASENAME cp file : \"*:~/\"
+    $SER_BASENAME cp -r \"dir\" : \"*:~/\"
+    # copy local files to each host:
+    $SER_BASENAME cp file1 file2 : \"*:~/save/to/directory\"
+    $SER_BASENAME cp file1 file2 : \"*:~/save/to/directory\" {1,2}:~/save/to/directory
+    # copy remote files to local
+    $SER_BASENAME cp \"hostname:~/file/to/path\" \"save/to/path\"
+    $SER_BASENAME cp {1,2}:file \"pattern*:~/file\" \"save/to/directory\"
+    $SER_BASENAME cp {1,2}:file \"pattern*:~/file\" : \"save/to/directory\"
+    $SER_BASENAME cp -r \"*:~/directory\" \"save/to/path\"";;
+        o)
+echo -e "Usage: $SER_BASENAME [o] [ssh_options] <index|pattern ...> [: <command>]
+
+login or executed command on remote host.
+
+examples:
+    $SER_BASENAME \"host1\"
+    $SER_BASENAME o \"host1\"
+    $SER_BASENAME o -C \"host1\" : \"ls\"
+    $SER_BASENAME \"*\" : \"ls\"";;
+        tunnel-add|add)
+echo "Usage: $SER_BASENAME tunnel-add <tunnel_name> <host> local [bind_address:]<bind_port> [host:]<host_port>
+       $SER_BASENAME tunnel-add <tunnel_name> <host> remote [bind_address:]<bind_port> [host>:]<host_port>
+       $SER_BASENAME tunnel-add <tunnel_name> <host> socks5 [bind_address:]<bind_port>";;
+        tunnel-remove|rm)
+echo "Usage: $SER_BASENAME tunnel-remove <tunnel_name> [forward_index]" ;;
+        tunnel-start|start)
+echo "Usage: $SER_BASENAME tunnel-start [tunnel_name|pattern]" ;;
+        tunnel-restart|restart)
+echo "Usage: $SER_BASENAME tunnel-restart [tunnel_name|pattern]" ;;
+        tunnel-stop|stop)
+echo "Usage: $SER_BASENAME tunnel-stop [tunnel_name|pattern]" ;;
+        tunnel-list|tl)
+echo "Usage: $SER_BASENAME tunnel-list" ;;
+        tunnel-check|check)
+echo "Usage: $SER_BASENAME tunnel-check
+
+Remember add task to crontab if you need reconnect automatic:
+
+crontab <<< '* * * * * bash $SER_PATH tunnel-check' " ;;
+        proxy)
+echo "Usage: $SER_BASENAME proxy <index|pattern>" ;;
+        *)
+echo -e "Usage: $SER_BASENAME <command>
+
+Type \"$SER_BASENAME help <command>\" for help on a specific command.
+
+Available commands:
+    o|<pattern|index>         : Login to host.
+    name                      : List all config name.
+    cp                        : Copy file to hosts.
+
+    tunnel-add|add            : Add forward to tunnel.
+    tunnel-remove|rm          : Remove forward from tunnel.
+    tunnel-start|start        : Start and enable tunnels.
+    tunnel-restart|restart    : Restart tunnels if enabled.
+    tunnel-stop|stop          : Stop and disable tunnels.
+    tunnel-list|tl            : List all tunnels status.
+    tunnel-info|info          : List all tunnels info information.
+    tunnel-check|check        : Connect enabled tunnels when disconected.
+
+    proxy                     : Connect host with '-W' option.
+    update                    : Update this program to latest version, Make sure that you have sufficient permissions.
+    help                      : Show this message.
+"
+echo "ver:${VERSION},github:https://github.com/vjunior1981/ser" ;;
+    esac
+}
+
+check_ssh_config() {
+    SSH_CONFIG_FILES=()
+    local IFS=':'
+
+    for FILE in $SER_SSH_CONFIG
+    do
+        [[ -a $FILE ]] && SSH_CONFIG_FILES+=("$FILE")
+    done
+
+    [[ ${#SSH_CONFIG_FILES[@]} -eq 0 ]] && error "no available ssh config file: $SER_SSH_CONFIG"
+}
+
+read_hosts_from_cache() {
+    cat "$SER_HOSTS_CACHE"
+}
+
+read_hosts_from_ssh_config() {
+    [[ -z "${SSH_CONFIG_FILES[*]}" ]] && check_ssh_config
+
+    local IFS='
+'
+    set -f
+
+    local host; local content
+
+    for l in $(cat "${SSH_CONFIG_FILES[@]}" | trim | sed "s/# HostName:/HostName/g")
+    do
+
+        local IFS='#'; read -r -a l <<< "$l"; local IFS=" "; local options=()
+
+        for p in ${l[0]}; do options+=($p); done
+
+        case ${options[0]} in
+            Host|Match)
+                if [[ -n "${host[*]}" ]]; then
+                    [[ -n ${host[3]} ]] && host_port="${host[3]}" || host_port="22"
+                    content+="${host[0]} ${host[1]} ${host[2]} ${host_port}\n"
+                fi
+
+                # ignore pattern style host name
+                if [[ "${options[0]}" == "Match" || "${options[1]}" =~ $REGEXP_PATTERN_HOSTNAME ]]; then
+                    host=()
+                else
+                    host=(${options[1]} $USER "" "")
+                fi ;;
+            User)
+                [[ -n "${host[*]}" ]] && host[1]=${options[1]} ;;
+            HostName)
+                [[ -n "${host[*]}" ]] && host[2]=${options[1]} ;;
+            Port)
+                [[ -n "${host[*]}" ]] && host[3]=${options[1]} ;;
+            *) ;;
+        esac
+    done
+
+    # handle last one
+    if [[ -n "${host[*]}" ]]; then
+        [[ -n ${host[3]} ]] && host_port="${host[3]}" || host_port="22"
+        content+="${host[0]} ${host[1]} ${host[2]} ${host_port}\n"
+    fi
+
+    echo -e "$content"
+
+}
+
+filesize() {
+    [[ ! -a "$1" ]] && return 0
+
+    case $(uname) in
+        Linux)
+            /usr/bin/stat --printf="%s" "$1" ;;
+        Darwin)
+            /usr/bin/stat -f "%z" "$1" ;;
+        *)
+            error "failed to read file size on $(uname)" ;;
+    esac
+}
+
+need_refresh_tunnel() {
+    local last; local cur
+
+    [[ -a "$SER_UPTIME" ]] && last=$(cat "$SER_UPTIME")
+
+    case $(uname) in
+        Linux)
+            cur=$(who -b | sha1sum) ;;
+        Darwin)
+            cur=$(who -b | shasum) ;;
+        *)
+            error "failed to read system up time on $(uname)" ;;
+    esac
+
+    if [[ "$last" == "$cur" ]]; then
+        return 1
+    else
+        echo "$cur" > "$SER_UPTIME"
+        return 0
+    fi
+}
+
+need_refresh_cache() {
+    [[ -z "${SSH_CONFIG_FILES[*]}" ]] && check_ssh_config
+
+    local last; local cur
+
+    [[ -a "$SER_HOSTS_LAST_MODIFY" ]] && last=$(cat "$SER_HOSTS_LAST_MODIFY")
+
+    case $(uname) in
+        Linux)
+            cur=$(sha1sum <<< "$VERSION $(/usr/bin/stat --printf="%Y" "${SSH_CONFIG_FILES[@]}")") ;;
+        Darwin)
+            cur=$(shasum <<< "$VERSION $(/usr/bin/stat -f "%m" "${SSH_CONFIG_FILES[@]}")") ;;
+        *)
+            error "failed to read file modify time on $(uname)" ;;
+    esac
+
+    if [[ "$last" == "$cur" ]]; then
+        return 1
+    else
+        echo "$cur" > "$SER_HOSTS_LAST_MODIFY"
+        return 0
+    fi
+}
+
+HOST_INDEX=0
+HOST=()
+HOSTS=()
+
+match_host () {
+    eval "[[ $1 == $2 ]]" 2>/dev/null # ignore syntax error
+}
+
+next_host () {
+    [[ -z "${HOSTS[HOST_INDEX]}" ]] && return 1
+    local IFS=' '; HOST=(${HOSTS[HOST_INDEX]})
+    ((HOST_INDEX++))
+    return 0
+}
+
+read_host_config() {
+    [[ -a "$HOME/.ssh/config" ]] && CONFIG_FILES+=("$HOME/.ssh/config")
+    local content=''
+    if need_refresh_cache "${CONFIG_FILES[@]}"; then
+        content=$(read_hosts_from_ssh_config)
+        echo "$content" > "$SER_HOSTS_CACHE"
+    else
+        content=$(read_hosts_from_cache)
+    fi
+    echo "$content"
+}
+
+select_hosts () {
+    HOST_INDEX=0
+    HOST=()
+    HOSTS=()
+
+    local name="$1"
+    [[ -z "$name" ]] && name='*'
+    set -f
+
+    local name="${1:-*}"
+
+    if [[ "$name" =~ $REGEXP_NUMBER ]]; then
+        HOSTS+=("$(sed -n "${name}p" <<< "$(read_host_config)")")
+        return
+    fi
+
+    local IFS='
+'
+    for l in $(read_host_config)
+    do
+        local IFS=' '; local host=($l)
+        match_host "${host[0]}" "${name}" && HOSTS+=("$l")
+    done
+}
+
+ssh_connect() {
+    local passargs=()
+
+    while getopts "1246AaCfGgKkMNnqsTtVvXxYyb:c:D:E:e:F:I:i:J:L:l:m:O:o:p:Q:R:S:W:w:" o; do
+        [[ $o == "?" ]] && exit 255
+
+        if [[ -z "$OPTARG" ]]; then
+            passargs+=("-$o")
+        else
+            passargs+=("-$o" "$OPTARG")
+        fi
+    done
+
+    shift $((OPTIND-1))
+
+    debug_msg "OPTIONS: '${passargs[*]}'"
+
+    local host_list=()
+
+    local cmd=''
+    local is_cmd=0
+
+    [[ $# -eq 0 ]] && error "empty host list"
+
+    for host in "$@"; do
+        if [[ "$is_cmd" -ne 0 ]]; then
+            debug_msg "CATCH COMMAND: $host"
+            cmd="$host"
+            break
+        fi
+
+        if [[ "$host" == ':' ]]; then
+            is_cmd=1
+            continue
+        fi
+
+        select_hosts "${host}"
+
+        while next_host; do
+            host_list+=("${HOST[0]}")
+        done
+
+        [[ $HOST_INDEX -eq 0 ]] && error "host index or pattern not exists: $host"
+    done
+
+    for host in "${host_list[@]}";do
+        if [[ -n "$cmd" ]]; then
+            do_cmd ssh "${passargs[@]}" "$host" $"$cmd" || exit
+        else
+            do_cmd ssh "${passargs[@]}" "$host" || exit
+        fi
+    done
+}
+
+read_tunnel_alived_status() {
+    pgrep -U "$(id -u)" -fl ssh | grep -E '^[0-9]+ ssh .*'"$SER_TUNNELS_DIRNAME"
+}
+
+read_tunnel_enabled_status() {
+    cat "$SER_TUNNELS_PATH/"*.enabled 2>/dev/null
+}
+
+select_tunnel() {
+    tunnel_alive_status=$(read_tunnel_alived_status)
+
+    TUNNEL_INDEX=0
+    TUNNEL=''
+    TUNNEL_SETS=()
+
+    local files=("$SER_TUNNELS_PATH/"*.tunnel)
+
+    [[ "${files[*]}" == "$SER_TUNNELS_PATH/*.tunnel" ]] && return
+
+    for name in $SER_TUNNELS_PATH/*.tunnel
+    do
+        name=$(basename "$name")
+        name="${name%.*}"
+        [[ ! "$name" =~ $REGEXP_TUNNEL_NAME ]] && error "illegal tunnel name: $name"
+        TUNNEL_SETS+=("$name")
+    done
+}
+
+select_tunnel_by_name() {
+    [[ ! "$1" =~ $REGEXP_TUNNEL_NAME ]] && error "illegal tunnel name: $1"
+
+    tunnel_alive_status=$(read_tunnel_alived_status)
+
+    TUNNEL_INDEX=0
+    TUNNEL=''
+    TUNNEL_SETS=()
+
+    if [[ -a "$SER_TUNNELS_PATH/$1.tunnel" ]]; then
+        TUNNEL_SETS+=("$1")
+    fi
+}
+
+select_tunnel_alived() {
+    tunnel_alive_status=$(read_tunnel_alived_status)
+
+    TUNNEL_INDEX=0
+    TUNNEL=''
+    TUNNEL_SETS=()
+
+    while read -r LINE
+    do
+        if [[ -z "$LINE" ]]; then break; fi
+        local IFS='/'; local arr=($LINE)
+        local name="${arr[${#arr[@]}-1]}" # last one, it's socket filename
+        name="${name%.*}"
+        TUNNEL_SETS+=("$name")
+    done <<< "$(grep -E -o "ControlPath=.*\.sock" <<< "$tunnel_alive_status")"
+}
+
+next_tunnel () {
+    [[ -z "${TUNNEL_SETS[TUNNEL_INDEX]}" ]] && return 1
+    TUNNEL="${TUNNEL_SETS[TUNNEL_INDEX]}"
+    ((TUNNEL_INDEX++))
+    return 0
+}
+
+select_forward_from_tunnel() {
+    FORWARD_INDEX=0
+    FORWARD=()
+    FORWARD_SETS=()
+
+    local IFS='
+'
+    FORWARD_SETS=($(cat "$SER_TUNNELS_PATH/$TUNNEL.tunnel"))
+}
+
+next_forward () {
+    [[ -z "${FORWARD_SETS[FORWARD_INDEX]}" ]] && return 1
+    local IFS=' '; FORWARD=(${FORWARD_SETS[FORWARD_INDEX]})
+    [[ ${#FORWARD[@]} -ne 4 ]] && error "invalid forward line: ${FORWARD_SETS[FORWARD_INDEX]}"
+    ((FORWARD_INDEX++))
+    return 0
+}
+
+tunnel_alived() {
+    local count
+
+    count="$(grep -c "ControlPath=$SER_TUNNELS_PATH/$TUNNEL.sock" <<< "$tunnel_alive_status")"
+
+    if [[ $count -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ $count -eq 1 ]]; then
+        return 0
+    fi
+
+    error "invalid tunnel process alived count"
+}
+
+tunnel_pid() {
+    local IFS=' '
+    local arr=($(grep "ControlPath=$SER_TUNNELS_PATH/$TUNNEL.sock" <<< "$tunnel_alive_status"))
+    [[ "${arr[0]}" =~ $REGEXP_NUMBER ]] && echo "${arr[0]}"
+}
+
+tunnel_enabled() {
+    if [[ -a "$SER_TUNNELS_PATH/$TUNNEL.enabled" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+tunnel_connect() {
+    local ssh_options=(
+        '-f'
+        '-N'
+        '-o' 'ControlMaster=auto'
+        '-o' "ControlPath=$SER_TUNNELS_PATH/${TUNNEL}.sock"
+        '-o' 'ExitOnForwardFailure=yes'
+        '-o' 'ConnectTimeout=30'
+        '-o' 'ServerAliveInterval=60'
+        '-o' 'ServerAliveCountMax=3'
+        '-o' 'BatchMode=yes'
+    )
+
+    select_forward_from_tunnel
+
+    local target_host
+
+    while next_forward
+    do
+        if [[ "$FORWARD_INDEX" -eq 1 ]]; then
+            target_host="${FORWARD[0]}"
+        fi
+
+        case "${FORWARD[1]}" in
+            local) ssh_options+=('-L' "${FORWARD[2]}:${FORWARD[3]}") ;;
+            remote) ssh_options+=('-R' "${FORWARD[2]}:${FORWARD[3]}") ;;
+            socks5) ssh_options+=('-D' "${FORWARD[2]}") ;;
+            *) error "invalid forward type: '${FORWARD[*]}'" ;;
+        esac
+    done
+
+    touch "${SER_TUNNELS_PATH}/${TUNNEL}.enabled"
+
+    ssh "$target_host" $"${ssh_options[@]}" > "$SER_TUNNELS_PATH/${TUNNEL}.out" 2> "$SER_TUNNELS_PATH/${TUNNEL}.err" < /dev/null
+}
+
+tunnel_disconnect() {
+    local pid; pid="$(tunnel_pid)"
+    [[ "$pid" =~ $REGEXP_NUMBER ]] && kill -s INT "$pid"
+
+    [[ -a "$SER_TUNNELS_PATH/$TUNNEL.enabled" ]] && /bin/rm -f "$SER_TUNNELS_PATH/$TUNNEL.enabled"
+    [[ -a "$SER_TUNNELS_PATH/$TUNNEL.err" ]] && /bin/rm -f "$SER_TUNNELS_PATH/$TUNNEL.err"
+    [[ -a "$SER_TUNNELS_PATH/$TUNNEL.out" ]] && /bin/rm -f "$SER_TUNNELS_PATH/$TUNNEL.out"
+    [[ -a "$SER_TUNNELS_PATH/$TUNNEL.sock" ]] && /bin/rm -f "$SER_TUNNELS_PATH/$TUNNEL.sock"
+}
+
+read_forward_address() {
+    [[ "$1" =~ $REGEXP_SPACE ]] && error "illegal address, contains space: $1"
+    local IFS=':'
+    local arr=($1)
+
+    if [[ ${#arr[@]} -eq 1 ]]; then
+        if [[ ! ${arr[0]} =~ $REGEXP_NUMBER ]]; then
+            error "illegal address, invalid port: ${arr[0]}"
+        fi
+        echo "127.0.0.1:$1"
+    elif [[ ${#arr[@]} -eq 2 ]]; then
+        if [[ ! ${arr[1]} =~ $REGEXP_NUMBER ]]; then
+            error "illegal address: $1"
+        fi
+        echo "$1"
+    else
+        error "illegal address: $1"
+    fi
+}
+
+tunnel_add() {
+    [[ -z "$1" ]] && error "please enter a tunnel name"
+    [[ -z "$2" ]] && error "please enter a host"
+    [[ -z "$3" ]] && error "please enter type name (local/remote/socks5)"
+
+    if [[ ! "$1" =~ $REGEXP_TUNNEL_NAME ]]; then
+        error "illegal tunnel name: $1"
+    fi
+
+    select_hosts "$2"
+
+    local target_host
+
+    if next_host; then
+        target_host="${HOST[0]}"
+    else
+        error "host '$2' not exists"
+    fi
+
+    local bind_addr;
+    local read_addr;
+    local forward_content="$target_host $3 $bind_addr $read_addr"
+
+    case "$3" in
+        local|remote)
+            [[ -z "$4" || -z "$5" ]] && error "please enter local and remote forward address"
+            bind_addr="$(read_forward_address "$4")"
+            read_addr="$(read_forward_address "$5")"
+            [[ -z "$bind_addr" || -z "$read_addr" ]] && exit 255
+            forward_content="$target_host $3 $bind_addr $read_addr" ;;
+        socks5)
+            [[ -z "$4" ]] && error "please enter bind address"
+            bind_addr="$(read_forward_address "$4")"
+            [[ -z "$bind_addr" ]] && exit 255
+            forward_content="$target_host $3 $bind_addr #" ;;
+        *) error "invalid type: $3" ;;
+    esac
+
+    select_tunnel_by_name "$1"
+
+    [[ ! -d "$SER_TUNNELS_PATH" ]] && mkdir -p "$SER_TUNNELS_PATH"
+
+    if next_tunnel; then
+        select_forward_from_tunnel
+
+        while next_forward;
+        do
+             [[ "${FORWARD[0]}" != "$target_host" ]] && error "can't specify diffrent host in same tunnel, exists host: ${FORWARD[0]}, try add: $target_host"
+        done
+
+        if echo "$forward_content" >> "$SER_TUNNELS_PATH/$1.tunnel"; then
+            echo "add forward \"$forward_content\" to tunnel \"$TUNNEL\" succeed"
+        fi
+    else
+        if echo "$forward_content" > "$SER_TUNNELS_PATH/$1.tunnel"; then
+            echo "add forward \"$forward_content\" to new tunnel \"$1\" succeed"
+        fi
+    fi
+}
+
+tunnel_remove() {
+    [[ -z "$1" ]] && error "please enter a tunnel name"
+
+    select_tunnel_by_name "$1"
+
+    if ! next_tunnel; then
+        error "tunnel \"$1\" not exists"
+    fi
+
+    if [[ -z "$2" || "$2" == "0" ]]; then
+        tunnel_alived && echo "stopping tunnel"
+        tunnel_disconnect # will delete enable record file and try stop process
+        echo "remove tunnel \"$TUNNEL\""
+        /bin/rm -f "$SER_TUNNELS_PATH/$TUNNEL.tunnel";
+    else
+        [[ ! "$2" =~ $REGEXP_NUMBER ]] && error "not a index: $2"
+        local tunnel_content; tunnel_content=$(cat "$SER_TUNNELS_PATH/$TUNNEL.tunnel")
+        if [[ "$(wc -l <<< "$tunnel_content" | trim)" -ge "$2" ]]; then
+            echo "rewrite tunnel \"$TUNNEL\" to delete rule #$2"
+            sed "$2d" <<< "$tunnel_content" > "$SER_TUNNELS_PATH/$TUNNEL.tunnel";
+        else
+            error "tunnel \"$TUNNEL\" not contain index $2"
+        fi
+    fi
+}
+
+need_check_update() {
+    if [[ -a "$SER_OPTIONS_PATH/last_check_update" ]]; then
+        # check update per 2 week
+        if [[ $(( $(date +%s) - $(cat "$SER_OPTIONS_PATH/last_check_update") )) -lt 1209600 ]]; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+check_update() {
+    date +%s > "$SER_OPTIONS_PATH/last_check_update"
+
+    local IFS='#'
+    local last_ver
+
+    if ! last_ver=($(curl -s -f "$SER_LAST_VERSION_URL")); then
+        local msg="failed to check update: $SER_LAST_VERSION_URL"
+        if [[ -n "$1" ]]; then
+            echo "$msg" >&2
+            return 1
+        else
+            error "$msg"
+        fi
+    fi
+
+    local this_ver=($VERSION)
+
+    if [[ ${last_ver[1]} -gt ${this_ver[1]} ]]; then
+        echo "new version available, lastest: ${last_ver[*]}, current: $VERSION"
+        [[ -n "$1" ]] && echo -e "$1"
+        return 0
+    fi
+
+    return 1
+}
+
+copy() {
+    local passargs=()
+
+    while getopts "12346BCpqrvc:F:i:l:o:P:S:" o; do
+        [[ $o == "?" ]] && exit 255
+
+        if [[ -z "$OPTARG" ]]; then
+            passargs+=("-$o")
+        else
+            passargs+=("-$o" "$OPTARG")
+        fi
+    done
+
+    shift $((OPTIND-1))
+
+    debug_msg "OPTIONS: '${passargs[*]}'"
+
+    # parse hostname
+    local src_path=()
+    local dest_path=()
+    local split_sign=0
+    local i
+
+    for path in "$@"; do
+        ((i++))
+        if [[ "$path" =~ ^(.+):(.+)$ ]]; then
+            local filepath="${BASH_REMATCH[2]}"
+            select_hosts "${BASH_REMATCH[1]}"
+            while next_host; do
+                if [[ $split_sign -eq 0 && $i -ne $# ]]; then
+                    src_path+=("${HOST[0]}:${filepath}")
+                else
+                    dest_path+=("${HOST[0]}:${filepath}")
+                fi
+            done
+        else
+            [[ $path == ':' ]] && split_sign=1 && continue
+            if [[ $split_sign -eq 0 && $i -ne $# ]]; then
+                src_path+=("$path")
+            else
+                dest_path+=("$path")
+            fi
+        fi
+    done
+
+    debug_msg "SOURCES: ${src_path[*]}"
+    debug_msg "DESTINATIONS: ${dest_path[*]}"
+
+    [[ ${#src_path[@]} -eq 0 ]] && error "no source path"
+    [[ ${#dest_path[@]} -eq 0 ]] && error "no destination path"
+
+    if [[ ${#dest_path[@]} -eq 1 ]]; then
+        do_cmd scp "${passargs[@]}" "${src_path[@]}" "${dest_path[@]}"
+    else
+        for dest in "${dest_path[@]}"; do
+            for src in "${src_path[@]}"; do
+                if ! do_cmd scp "${passargs[@]}" "$src" "$dest"; then
+                    exit
+                fi
+            done
+        done
+    fi
+}
+
+## Command actions
+
+[[ ! -d "$SER_OPTIONS_PATH" ]] && mkdir "$SER_OPTIONS_PATH"
+
+if [[ -z "$1" ]]; then
+    if [[ -n "$SER_LAST_VERSION_URL" && -n "$SER_LAST_SCRIPT_URL" ]]; then
+        need_check_update && check_update "${COLOR_GREEN}use: \"ser update\" update to lastest version.${NC}"
+    fi
+
+    host=()
+    IFS='
+'
+    i=0
+
+    for l in $(read_host_config)
+    do
+        IFS=' '; read -r -a host <<< "$l"
+        host_port=""
+        ! [[ "${host[3]}" == "#" ]] && host_port=":${host[3]}"
+        ((i++)); echo -e "$i) ${COLOR_LIGHT_GRAY}${host[0]}${NC} - ${host[1]}@${host[2]}${host_port}"
+    done
+
+    exit
+fi
+
+case $1 in
+    help|-h|--help)
+        help "$2" ;;
+    name)
+        shift 1
+
+        for host in "$@"; do
+            select_hosts "${host}"
+
+            while next_host; do
+                echo "${HOST[0]}"
+            done
+
+            [[ $HOST_INDEX -eq 0 ]] && error "host index or pattern not exists: $host"
+        done ;;
+    cp)
+        copy "${@:2}" ;;
+    o)
+        ssh_connect "${@:2}" ;;
+    proxy)
+        select_hosts "$2"
+
+        ! next_host && error "host index or pattern not exists: $2"
+
+        port="${HOST[3]}"; [[ "$port" == '#' ]] && port=22
+
+        ssh "${HOST[0]}" -W $"${HOST[2]}:$port" 2> /dev/null
+        ;;
+    tunnel-add|add)
+        tunnel_add "${@:2}";;
+    tunnel-remove|rm)
+        tunnel_remove "${@:2}";;
+    tunnel-list|tl)
+        select_tunnel
+
+        while next_tunnel
+        do
+            select_forward_from_tunnel
+
+            tunnel_enabled && state="[${COLOR_GREEN}enabled${NC}]" || state="[${COLOR_RED}disabled${NC}]"
+
+            if tunnel_alived; then
+                state="$state [${COLOR_GREEN}connected${NC}]"
+            else
+                state="$state [${COLOR_RED}disconnected${NC}]"
+            fi
+
+            echo -e "${COLOR_LIGHT_GRAY}${TUNNEL}${NC} - ${state}"
+        done
+        ;;
+    tunnel-info|info)
+        [[ -z "$2" ]] && tunnel_name='*' || tunnel_name="$2"
+
+        select_tunnel
+
+        while next_tunnel
+        do
+            if [[ "${TUNNEL}" != ''$tunnel_name ]]; then
+                continue
+            fi
+
+            select_forward_from_tunnel
+
+            while next_forward
+            do
+                if [[ "$FORWARD_INDEX" -eq 1 ]]; then
+                    echo -e " # tunnel: ${COLOR_LIGHT_GRAY}${TUNNEL}${NC}"
+                    echo -e " - host: ${FORWARD[0]} ${state}"
+                    echo -e " - enable: \c"
+                    tunnel_enabled && echo -e "${COLOR_GREEN}yes${NC}" || echo -e "${COLOR_RED}no${NC}"
+                    echo -e " - connect: \c"
+                    tunnel_alived && echo -e "${COLOR_GREEN}yes${NC}" || echo -e "${COLOR_RED}no${NC}"
+                    echo -e " - pid: \c"
+                    tunnel_alived && tunnel_pid || echo '-'
+                    echo -e " - out file: $SER_TUNNELS_PATH/$TUNNEL.out"
+                    echo -e " - error file: $SER_TUNNELS_PATH/$TUNNEL.err\c"
+                    if [[ "$(filesize "$SER_TUNNELS_PATH/$TUNNEL.err")" -gt 0 ]]; then
+                        echo -e " (${COLOR_RED}errored${NC})"
+                        echo -e " - last error: ${COLOR_RED}$(sed -n '$p' "$SER_TUNNELS_PATH/$TUNNEL.err")${NC}"
+                    else
+                        echo ""
+                    fi
+                fi
+
+                case "${FORWARD[1]}" in
+                    local) echo " - forward #$FORWARD_INDEX: (local) ${FORWARD[2]} <= (remote) ${FORWARD[3]}" ;;
+                    remote) echo " - forward #$FORWARD_INDEX: (local) ${FORWARD[3]} => (remote) ${FORWARD[2]}" ;;
+                    socks5) echo " - forward #$FORWARD_INDEX: (socks5) ${FORWARD[2]}" ;;
+                    *) error "invalid line: '${FORWARD[*]}'" ;;
+                esac
+            done
+        done
+        ;;
+
+    tunnel-start|start)
+        [[ -z "$2" ]] && tunnel_name='*' || tunnel_name="$2"
+
+        select_tunnel
+
+        set -f;
+
+        while next_tunnel
+        do
+            if [[ "${TUNNEL}" == ''$tunnel_name ]]; then
+                if tunnel_enabled && tunnel_alived; then
+                    echo -e "[${COLOR_GREEN}START TUNNEL${NC}] - $TUNNEL (has been started, ignore it)"
+                    continue
+                fi
+
+                echo -e "[${COLOR_GREEN}START TUNNEL${NC}] - $TUNNEL: \c"
+
+                if tunnel_connect; then
+                    echo 'OK'
+                else
+                    echo "FAILED, EXIT CODE: $?"
+                fi
+            fi
+        done
+        ;;
+    tunnel-stop|stop)
+        [[ -z "$2" ]] && tunnel_name='*' || tunnel_name="$2"
+
+        select_tunnel
+
+        set -f;
+
+        while next_tunnel
+        do
+            if [[ "${TUNNEL}" != ''$tunnel_name ]]; then
+                continue
+            fi
+
+            if tunnel_enabled || tunnel_alived; then
+                echo -e "[${COLOR_RED}STOP TUNNEL${NC}] - $TUNNEL"
+                tunnel_disconnect
+            fi
+        done
+
+        select_tunnel_alived
+
+        while next_tunnel
+        do
+            if [[ "${TUNNEL}" != ''$tunnel_name ]]; then
+                continue
+            fi
+
+            if [[ "$TUNNEL" == ''$tunnel_name ]]; then
+                echo -e "[${COLOR_RED}STOP UNMANAGED TUNNEL${NC}] - $TUNNEL "
+                tunnel_disconnect
+            fi
+        done ;;
+    tunnel-restart|restart)
+        [[ -z "$2" ]] && tunnel_name='*' || tunnel_name="$2"
+
+        select_tunnel
+
+        set -f;
+
+        while next_tunnel
+        do
+            if [[ "${TUNNEL}" != ''$tunnel_name ]]; then
+                continue
+            fi
+
+            if tunnel_enabled; then
+                echo -e "[${COLOR_GREEN}RESTART TUNNEL${NC}] - $TUNNEL: \c"
+                tunnel_disconnect
+
+                if tunnel_connect; then
+                    echo 'OK'
+                else
+                    echo "FAILED, EXIT CODE: $?"
+                fi
+            fi
+        done ;;
+    tunnel-check|check)
+        if need_refresh_tunnel; then
+            refresh_tunnel=1
+        fi
+
+        select_tunnel
+
+        while next_tunnel
+        do
+            select_forward_from_tunnel
+
+            if ! tunnel_enabled; then
+                continue
+            fi
+
+            if tunnel_alived; then
+                if [[ $refresh_tunnel -eq 1 ]]; then
+                    tunnel_disconnect
+                else
+                    continue
+                fi
+            fi
+
+            echo -e "[${COLOR_GREEN}START TUNNEL${NC}] - $TUNNEL: \c"
+
+            if tunnel_connect; then
+                echo 'OK'
+            else
+                echo "FAILED, EXIT CODE: $?"
+            fi
+        done ;;
+    update)
+        ! [[ -n "$SER_LAST_VERSION_URL" && -n "$SER_LAST_SCRIPT_URL" ]] && error "update unavailable: update address not exists"
+
+        echo "check update ..."
+
+        if check_update ''; then
+            echo "downloading ..."
+            if new_content="$(curl -s -f "$SER_LAST_SCRIPT_URL")"; then
+                echo "updating: $SER_PATH ..."
+                exec cat > "$SER_PATH" <<< "$new_content" && chmod u+rx "$SER_PATH"
+            else
+                error "failed to download: $SER_LAST_SCRIPT_URL."
+            fi
+        else
+            echo 'no update is available.'
+        fi ;;
+    *)
+        ssh_connect "$@";;
+esac

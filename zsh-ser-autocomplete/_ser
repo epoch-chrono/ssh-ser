@@ -1,0 +1,61 @@
+#compdef ser
+###############################################################################
+# -*- mode:sh; -*-
+# Time-stamp: <Thu 05 Sep 2019 05:51:20 PM -03>
+#
+# Zsh completion for [ser]
+#
+# Copyright (c) 2019 Vitor Jr.
+###############################################################################
+#
+# Test modification of this file in live in your shell:
+#
+#  unfunction _ser && autoload -U _ser
+#
+
+typeset -A opt_args
+
+
+# Main dispatcher
+
+_ser() {
+
+    local -a ser_hosts
+
+
+    local -a _ser_cmds
+    _ser_cmds=(
+        'o|<pattern|index>:Login to host.'
+        'name:List all config name.'
+        'cp:Copy file to hosts.'
+
+        'tunnel-add|add:Add forward to tunnel.'
+        'tunnel-remove|rm:Remove forward from tunnel.'
+        'tunnel-start|start:Start and enable tunnels.'
+        'tunnel-restart|restart:Restart tunnels if enabled.'
+        'tunnel-stop|stop:Stop and disable tunnels.'
+        'tunnel-list|tl:List all tunnels status.'
+        'tunnel-info|info:List all tunnels info information.'
+        'tunnel-check|check:Connect enabled tunnels when disconected.'
+
+        'proxy:Connect host with '-W' option.'
+        'update:Update this program to latest version, Make sure that you have sufficient permissions.'
+        'help:Show this message.'
+    )
+    local curcontext="$curcontext" state line ret=1
+    typeset -A opt_args
+
+
+  SER_HOSTS=$(cat ~/.ssh/config|grep 'Host '|grep -iv '\*' | awk '{print $2}'|sort|uniq)
+
+  SER_HOSTS_PARSE=()
+  while read -r LINE
+  do
+    SER_HOSTS_PARSE+=("$LINE")
+  done <<< $SER_HOSTS
+
+    _arguments \
+        ':ser host:($(echo ${SER_HOSTS_PARSE}))'
+}
+
+_ser "$@"
